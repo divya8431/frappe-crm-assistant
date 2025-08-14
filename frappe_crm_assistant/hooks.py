@@ -5,6 +5,11 @@ app_description = "Frappe Crm Assistant"
 app_email = "divya@promantia.com"
 app_license = "mit"
 
+
+assistant_tools = [
+    "frappe_crm_assistant.frappe_crm_assistant.tool.ai_call_note_creator.CreateNoteFromCall"
+]
+
 # Apps
 # ------------------
 
