@@ -7,7 +7,7 @@ app_license = "mit"
 
 
 assistant_tools = [
-    "frappe_crm_assistant.frappe_crm_assistant.tool.ai_call_note_creator.CreateNoteFromCall"
+    "frappe_crm_assistant.tool.ai_call_note_creator.CreateNotesFromCallLogs"
 ]
 
 # Apps
