@@ -4,19 +4,23 @@
 
 import frappe
 import requests
+import tempfile
+import whisper
+import os
+from pydub import AudioSegment
 from frappe import _
 from typing import Dict, Any, List, Optional
 from frappe_assistant_core.core.base_tool import BaseTool
 
-DEEPGRAM_API_KEY: Optional[str] = frappe.conf.get("deepgram_api_key")
-DEEPGRAM_API_URL: str = "https://api.deepgram.com/v1/listen"
-AUDIO_CONTENT_TYPE: str = "audio/mp3"
+# DEEPGRAM_API_KEY: Optional[str] = frappe.conf.get("deepgram_api_key")
+# DEEPGRAM_API_URL: str = "https://api.deepgram.com/v1/listen"
+# AUDIO_CONTENT_TYPE: str = "audio/mp3"
 
 class CreateNotesFromCallLogs(BaseTool):
     def __init__(self):
         super().__init__()
         self.name = "generate_notes_from_calls"
-        self.description = _("Create Notes from one or multiple CRM Call Logs using Deepgram transcription.")
+        self.description = _("Create Notes from one or multiple CRM Call Logs using wisper transcription. and summerize the text ")
         self.requires_permission = "Note"
 
         self.inputSchema = {
@@ -94,7 +98,7 @@ class CreateNotesFromCallLogs(BaseTool):
             return [d.name for d in logs]
 
         return []
-
+    
     def _process_call_log(self, call_log_name: str,
                           forced_ref_dt: Optional[str],
                           forced_ref_name: Optional[str]) -> Dict[str, Any]:
@@ -113,36 +117,57 @@ class CreateNotesFromCallLogs(BaseTool):
         ref_dt = forced_ref_dt or call_log.get("reference_doctype")
         ref_name = forced_ref_name or call_log.get("reference_name")
 
-        # download audio
-        audio_data = requests.get(recording_url, stream=True).content
+        # Download and convert audio to WAV
+        try:
+            audio_data = requests.get(recording_url, stream=True).content
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_mp3:
+                temp_mp3.write(audio_data)
+                temp_mp3_path = temp_mp3.name
 
-        # Deepgram transcription
-        dg_response = requests.post(
-            DEEPGRAM_API_URL,
-            headers={"Authorization": f"Token {DEEPGRAM_API_KEY}", "Content-Type": AUDIO_CONTENT_TYPE},
-            data=audio_data
-        )
-        dg_response.raise_for_status()
-        transcription = dg_response.json().get("results", {}).get("channels", [{}])[0] \
-            .get("alternatives", [{}])[0].get("transcript", "")
+            temp_wav_path = temp_mp3_path.replace(".mp3", ".wav")
+            AudioSegment.from_mp3(temp_mp3_path).export(temp_wav_path, format="wav")
+
+            # Load Whisper model
+            model = whisper.load_model("base")  # Use "medium" or "large" for better accuracy
+
+            # Detect language
+            audio = whisper.load_audio(temp_wav_path)
+            audio = whisper.pad_or_trim(audio)
+            mel = whisper.log_mel_spectrogram(audio).to(model.device)
+            _, probs = model.detect_language(mel)
+            detected_lang = max(probs, key=probs.get)
+
+            # Transcribe
+            result = model.transcribe(temp_wav_path, language=detected_lang)
+            transcription = result.get("text", "").strip()
+
+            # Cleanup
+            os.remove(temp_mp3_path)
+            os.remove(temp_wav_path)
+
+        except Exception as e:
+            return {"success": False, "error": str(e), "call_log": call_log_name}
 
         if not transcription:
             transcription = _("No speech detected in the recording.")
 
-        # create note
+        # Create note
         note = frappe.new_doc("FCRM Note")
         note.title = _("Note from Call on {0}").format(frappe.utils.format_date(call_log.creation))
-        note.content = f"Call Summary for {call_log.caller}\n\n{transcription}"
+        note.content = f"Call Summary for {call_log.caller}\n\nLanguage Detected: {detected_lang}\n\n{transcription}"
         if ref_dt and ref_name:
             note.reference_doctype = ref_dt
             note.reference_docname = ref_name
         note.insert(ignore_permissions=True)
 
-        # link back
+        # Link back
         if hasattr(call_log, "note"):
             call_log.note = note.name
+            if ref_dt and ref_name:
+                call_log.reference_doctype = ref_dt
+                call_log.reference_docname = ref_name
             call_log.save(ignore_permissions=True)
 
         return {"success": True, "note": note.name, "call_log": call_log_name}
-
+ 
 create_notes_from_call_logs = CreateNotesFromCallLogs()
